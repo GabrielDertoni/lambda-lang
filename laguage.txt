@@ -1,0 +1,6 @@
+
+(a, b -> a + b)(1, 2) -- 1 + 2 = 3
+
+(x -> x(x))(x -> x(x)) -- Loop infinito
+
+
