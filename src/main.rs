@@ -78,3 +78,23 @@ fn main() -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_infinite_loop() {
+        let input = "(\\a. a a) (\\a. a a)";
+        let mut heap = Vec::new();
+        let mut compiled = compile_program(input, &mut heap).unwrap();
+        assert!(compiled.eval().is_err());
+    }
+
+    #[test]
+    fn test_id() {
+        let input = "(\\a. a) \"hello\"";
+        let mut heap = Vec::new();
+        let mut compiled = compile_program(input, &mut heap).unwrap();
+        println!("{:?}", compiled.eval().unwrap());
+    }
+}

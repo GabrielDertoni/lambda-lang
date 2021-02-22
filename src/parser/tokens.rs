@@ -25,6 +25,8 @@ macro_rules! define_token_structs {
 
         impl Parser for $tok {
             fn parse<'a>(input: &'a ParseStream<'a>) -> Result<$tok> {
+                input.skip_whitespace();
+
                 let span = input.curr_span();
                 if let $(Some($patt))|+ = input.get() {
                     input.advance();
@@ -43,10 +45,14 @@ macro_rules! define_token_structs {
 
         impl Parser for $tok {
             fn parse<'a>(input: &'a ParseStream<'a>) -> Result<$tok> {
+                input.skip_whitespace();
+
                 let mut count = 0;
                 let mut span = input.curr_span();
+
                 while let $(Some($patt))|+ = input.get() {
                     input.advance();
+
                     span = span.merge(input.curr_span());
                     count += 1;
                 }
@@ -103,10 +109,76 @@ pub struct Paren {
     pub span: Span,
 }
 
+impl Paren {
+    fn new(span: Span) -> Paren {
+        Paren { span }
+    }
+}
+
+fn skip_string<'a>(input: &'a ParseStream<'a>) -> usize {
+    let mut count = 0;
+    assert!(input.get().unwrap() == '"');
+    while let Some(c) = input.get() {
+        // If it is an escape char, advance one more
+        if c == '\\' {
+            input.advance();
+            count += 1;
+        } else if c == '"' {
+            break;
+        }
+        input.advance();
+        count += 1;
+    }
+    count
+}
+
+fn skip_until_paren<'a>(input: &'a ParseStream<'a>) -> usize {
+    let mut count = 0;
+    while let Some(c) = input.get() {
+        if c == '(' || c == ')' {
+            break;
+        } else if c == '"' {
+            count += skip_string(input);
+        }
+        input.advance();
+        count += 1;
+    }
+    count
+}
+
+pub fn parse_parenthesis<'a>(input: &'a ParseStream<'a>) -> Result<(ParseStream<'a>, Paren)> {
+    let mut depth = 0;
+    let original = input.get_remaining();
+    let start = input.curr_span().start();
+    assert!(input.get().unwrap() == '(');
+    while let Some(c) = input.get() {
+        if c == '(' {
+            depth += 1;
+        } else {
+            depth -= 1;
+        }
+
+        if depth == 0 {
+            break;
+        } else if depth < 0 {
+            return Err(Error::new(input.curr_span().start(), "Unmatched parenthesis"));
+        }
+
+        skip_until_paren(input);
+    }
+
+    let span = start.merge(input.curr_span().start());
+    let stream = ParseStream::new(span, &original[1..span.width()-2]);
+    let paren = Paren::new(span);
+    Ok((stream, paren))
+}
+
 impl Parser for Var {
     fn parse<'a>(input: &'a ParseStream<'a>) -> Result<Var> {
+        input.skip_whitespace();
         let span = input.curr_span();
         let mut content = String::new();
+
         while let Some(c) = input.get() {
             if c.is_alphabetic() {
                 content.push(c);
@@ -115,12 +187,17 @@ impl Parser for Var {
             }
             input.advance();
         }
-        return Ok(Var::new(span.with_width(content.len()), content));
+        if content.len() == 0 {
+            Err(Error::new(span.start(), "Expected a variable"))
+        } else {
+            Ok(Var::new(span.with_width(content.len()), content))
+        }
     }
 }
 
 impl Parser for Literal {
     fn parse<'a>(input: &'a ParseStream<'a>) -> Result<Literal> {
+        input.skip_whitespace();
         let span = input.curr_span();
         let mut content = String::new();
         let mut count = 0;
@@ -129,6 +206,7 @@ impl Parser for Literal {
         while let Some(c) = input.get() {
             if c == '\\' {
                 input.advance();
+                input.skip_whitespace();
                 if let Some(escaped) = input.get() {
                     content.push(escaped);
                 } else {
@@ -140,6 +218,7 @@ impl Parser for Literal {
                 content.push(c);
             }
             input.advance();
+            input.skip_whitespace();
             count += 1;
         }
         Quote::parse(input)?;
@@ -147,3 +226,4 @@ impl Parser for Literal {
         Ok(Literal::new(span.with_width(count), content))
     }
 }
+

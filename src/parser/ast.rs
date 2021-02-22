@@ -23,7 +23,6 @@ pub enum Expr {
     Lambda(Lambda),
     Close(Close),
     Appl(Appl),
-    Literal(tokens::Literal),
 }
 
 #[derive(Debug)]
@@ -38,6 +37,7 @@ pub struct Lambda {
 pub enum Close {
     Paren(Box<Expr>),
     Var(tokens::Var),
+    Literal(tokens::Literal),
 }
 
 #[derive(Debug)]

@@ -29,7 +29,17 @@ impl<'a> ParseStream<'a> {
         }
     }
 
-    fn advance(&self) {
+    pub fn skip_whitespace(&'a self) {
+        while let Some(c) = self.get() {
+            if c.is_whitespace() {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+    }
+
+    pub fn advance(&self) {
         let mut span = self.curr_span();
 
         let mut it = self.remaining.get().chars();
@@ -41,7 +51,7 @@ impl<'a> ParseStream<'a> {
         self.curr_span.set(span);
     }
 
-    fn advance_by(&self, n: usize) {
+    pub fn advance_by(&self, n: usize) {
         let mut span = self.curr_span();
 
         let mut it = self.remaining.get().chars();
@@ -55,23 +65,33 @@ impl<'a> ParseStream<'a> {
         self.curr_span.set(span);
     }
 
-    fn get(&'a self) -> Option<char> {
+    #[inline]
+    pub fn get(&'a self) -> Option<char> {
         self.remaining.get().chars().nth(0)
     }
+    
+    #[inline]
+    pub fn get_remaining(&'a self) -> &str {
+        self.remaining.get()
+    }
 
-    fn peek(&'a self, n: usize) -> Option<&'a str> {
+    #[inline]
+    pub fn peek(&'a self, n: usize) -> Option<&'a str> {
         self.remaining.get().get(..n)
     }
 
-    fn parse<T: Parser>(&'a self) -> Result<T> {
+    #[inline]
+    pub fn parse<T: Parser>(&'a self) -> Result<T> {
         T::parse(self)
     }
 
-    fn is_empty(&self) -> bool {
+    #[inline]
+    pub fn is_empty(&self) -> bool {
         self.remaining.get().len() == 0
     }
 
-    fn curr_span(&self) -> Span {
+    #[inline]
+    pub fn curr_span(&self) -> Span {
         self.curr_span.get()
     }
 }
@@ -127,18 +147,22 @@ impl Parser for Macro {
 impl Parser for Expr {
     fn parse<'a>(input: &'a ParseStream<'a>) -> Result<Expr> {
         let span = input.curr_span();
+        input.skip_whitespace();
         let next = input
             .peek(1)
             .ok_or(Error::new(span.start(), "Unexpected end of input"))?;
 
         let peek_stream = ParseStream::new(Span::new(span.start, span.start + 1), next);
         if tokens::Lambda::parse(&peek_stream).is_ok() {
-            Ok(Expr::Lambda(input.parse()?))
-        } else if tokens::Quote::parse(&peek_stream).is_ok() {
-            Ok(Expr::Literal(input.parse()?))
+            let lamb = match input.parse() {
+                Ok(lamb) => lamb,
+                Err(err) => { println!("{}", err); return Err(err); },
+            };
+            Ok(Expr::Lambda(lamb))
         } else {
             let rhs = input.parse()?;
-            if input.is_empty() {
+            input.skip_whitespace();
+            if input.is_empty() || input.peek(1).map(|s| s == ")").unwrap_or(false) {
                 Ok(Expr::Close(rhs))
             } else {
                 let lhs = input.parse()?;
@@ -169,11 +193,32 @@ impl Parser for Appl {
 }
 
 impl Parser for Close {
-    fn parse<'a>(input: &'a ParseStream<'a>) -> Result<Self> {
+    /*
+    fn parse<'a>(input: &'a ParseStream<'a>) -> Result<Close> {
+        let lookahead = input.peek(1)
+            .ok_or_else(|| Error::new(input.curr_span().start(), "Unexpected end of input"))?;
+
+        if lookahead == "(" {
+            let (content, _paren) = tokens::parse_parenthesis(input)?;
+            // let expr = content.parse()?;
+            let expr = Box::new(Expr::parse(&content)?);
+            Ok(Close::Paren(expr))
+        } else {
+            Ok(Close::Var(input.parse()?))
+        }
+    }
+    */
+    fn parse<'a>(input: &'a ParseStream<'a>) -> Result<Close> {
+        input.skip_whitespace();
+        let lookahead = input.peek(1)
+            .ok_or_else(|| Error::new(input.curr_span().start(), "Unexpected end of input"))?;
+
         if tokens::LParen::parse(input).is_ok() {
-            let close = Close::Paren(input.parse()?);
+            let expr = input.parse()?;
             tokens::RParen::parse(input)?;
-            Ok(close)
+            Ok(Close::Paren(expr))
+        } else if lookahead == "\"" {
+            Ok(Close::Literal(input.parse()?))
         } else {
             Ok(Close::Var(input.parse()?))
         }
@@ -186,12 +231,37 @@ mod test {
     use super::*;
 
     #[test]
+    fn test_parse_stmt() {
+        let stream = ParseStream::from("\\a. a a");
+        assert!(Stmt::parse(&stream).is_ok());
+        assert!(stream.is_empty(), "remaining: {}", stream.remaining.get());
+    }
+
+    #[test]
     fn test_literal_parser() {
-        let input = "\\a. a a";
-        let stream = ParseStream::from(input);
-        match Expr::parse(&stream) {
-            Ok(res) => eprintln!("{:#?}", res),
-            Err(e)  => eprintln!("{}", e),
-        }
+        let stream = ParseStream::from("\\a. a a");
+        assert!(Expr::parse(&stream).is_ok());
+        assert!(stream.is_empty(), "remaining: {}", stream.remaining.get());
+    }
+
+    #[test]
+    fn test_paren() {
+        let stream = ParseStream::from("(\\a. a a)");
+        assert!(Expr::parse(&stream).is_ok());
+        assert!(stream.is_empty(), "remaining: {}", stream.remaining.get());
+    }
+
+    #[test]
+    fn test_var() {
+        let stream = ParseStream::from("a");
+        assert!(tokens::Var::parse(&stream).is_ok());
+        assert!(stream.is_empty(), "remaining: {}", stream.remaining.get());
+    }
+
+    #[test]
+    fn test_literal() {
+        let stream = ParseStream::from("\"hello world\"");
+        assert!(tokens::Literal::parse(&stream).is_ok());
+        assert!(stream.is_empty(), "remaining: {}", stream.remaining.get());
     }
 }

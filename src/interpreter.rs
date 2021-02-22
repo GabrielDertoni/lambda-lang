@@ -27,7 +27,7 @@ impl<'a> Expr<'a> {
         }
     }
 
-    // Perform beta-reduction all the way down.
+    // Perform beta-reduction.
     pub fn eval(&mut self) -> Result<&'_ mut Self, String> {
         let mut eval_stack: Vec<&mut Expr> = Vec::new();
         let mut curr: &mut Expr = self;
@@ -105,7 +105,7 @@ impl<'a> std::fmt::Display for Expr<'a> {
                 }
             },
             Expr::Var(v)            => write!(f, "{}", (*v as u8 + 97) as char),
-            Expr::Literal(s)        => write!(f, "`{}`", s),
+            Expr::Literal(s)        => write!(f, "\"{}\"", s),
         }
     }
 }
