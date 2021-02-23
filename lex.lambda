@@ -1,8 +1,6 @@
 
-A = x. `2`
-B = x. `3`
+def Id = \a. a "hello"
 
-C = λx. λy. x y
-Y = λf. (λx. f (x x)) (λx. f (x x))
+def YComb = \f. (\x. f (x x)) (\x. f (x x))
 
-(\a. a a) (\a. a a)
+YComb Id

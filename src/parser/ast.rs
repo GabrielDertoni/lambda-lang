@@ -13,6 +13,7 @@ pub enum Stmt {
 
 #[derive(Debug)]
 pub struct Macro {
+    pub def_token: tokens::Def,
     pub name: tokens::Var,
     pub eq_token: tokens::Equal,
     pub value: Expr,
@@ -42,8 +43,8 @@ pub enum Close {
 
 #[derive(Debug)]
 pub struct Appl {
-    pub rhs: Close,
     pub lhs: Close,
+    pub rhs: Close,
 }
 
 

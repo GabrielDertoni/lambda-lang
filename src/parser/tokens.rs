@@ -24,7 +24,7 @@ macro_rules! define_token_structs {
         define_token_struct!(pub struct $tok);
 
         impl Parser for $tok {
-            fn parse<'a>(input: &'a ParseStream<'a>) -> Result<$tok> {
+            fn parse<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> Result<$tok> {
                 input.skip_whitespace();
 
                 let span = input.curr_span();
@@ -44,7 +44,7 @@ macro_rules! define_token_structs {
         define_token_struct!(pub struct $tok);
 
         impl Parser for $tok {
-            fn parse<'a>(input: &'a ParseStream<'a>) -> Result<$tok> {
+            fn parse<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> Result<$tok> {
                 input.skip_whitespace();
 
                 let mut count = 0;
@@ -82,6 +82,34 @@ define_token_structs! {
 }
 
 #[derive(Debug)]
+pub struct Def {
+    pub span: Span,
+}
+
+impl Def {
+    fn new(span: Span) -> Def {
+        Def { span }
+    }
+}
+
+impl Parser for Def {
+    fn parse<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> Result<Def> {
+        input.skip_whitespace();
+        let span = input.curr_span();
+        let tok = input
+            .peek(4)
+            .ok_or_else(|| Error::new(span.start(), "Expected def token"))?;
+
+        if tok == "def " {
+            input.advance_by(4);
+            Ok(Def::new(span.with_width(3)))
+        } else {
+            Err(Error::new(span.start(), "Expected def token"))
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct Var {
     pub span: Span,
     pub name: String,
@@ -115,7 +143,7 @@ impl Paren {
     }
 }
 
-fn skip_string<'a>(input: &'a ParseStream<'a>) -> usize {
+fn skip_string<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> usize {
     let mut count = 0;
     assert!(input.get().unwrap() == '"');
     while let Some(c) = input.get() {
@@ -132,7 +160,7 @@ fn skip_string<'a>(input: &'a ParseStream<'a>) -> usize {
     count
 }
 
-fn skip_until_paren<'a>(input: &'a ParseStream<'a>) -> usize {
+fn skip_until_paren<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> usize {
     let mut count = 0;
     while let Some(c) = input.get() {
         if c == '(' || c == ')' {
@@ -146,17 +174,20 @@ fn skip_until_paren<'a>(input: &'a ParseStream<'a>) -> usize {
     count
 }
 
-pub fn parse_parenthesis<'a>(input: &'a ParseStream<'a>) -> Result<(ParseStream<'a>, Paren)> {
+pub fn parse_parenthesis<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> Result<(ParseStream<'tok>, Paren)> {
     let mut depth = 0;
     let original = input.get_remaining();
     let start = input.curr_span().start();
+
     assert!(input.get().unwrap() == '(');
+
     while let Some(c) = input.get() {
         if c == '(' {
             depth += 1;
         } else {
             depth -= 1;
         }
+        input.advance();
 
         if depth == 0 {
             break;
@@ -168,13 +199,13 @@ pub fn parse_parenthesis<'a>(input: &'a ParseStream<'a>) -> Result<(ParseStream<
     }
 
     let span = start.merge(input.curr_span().start());
-    let stream = ParseStream::new(span, &original[1..span.width()-2]);
+    let stream = ParseStream::new(span, &original[1..span.width() - 1]);
     let paren = Paren::new(span);
     Ok((stream, paren))
 }
 
 impl Parser for Var {
-    fn parse<'a>(input: &'a ParseStream<'a>) -> Result<Var> {
+    fn parse<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> Result<Var> {
         input.skip_whitespace();
         let span = input.curr_span();
         let mut content = String::new();
@@ -196,7 +227,7 @@ impl Parser for Var {
 }
 
 impl Parser for Literal {
-    fn parse<'a>(input: &'a ParseStream<'a>) -> Result<Literal> {
+    fn parse<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> Result<Literal> {
         input.skip_whitespace();
         let span = input.curr_span();
         let mut content = String::new();

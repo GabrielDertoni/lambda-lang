@@ -14,8 +14,8 @@ fn memapply<T, F: FnOnce(T) -> T>(dest: &mut T, f: F) {
     }
 }
 
-impl<'a> Expr<'a> {
-    fn subst(&mut self, var: usize, new_expr: Expr<'a>) {
+impl Expr {
+    fn subst(&mut self, var: usize, new_expr: Expr) {
         match self {
             Expr::Lambda { expr, .. } => expr.subst(var, new_expr),
             Expr::Appl { f, arg }     => {
@@ -28,7 +28,7 @@ impl<'a> Expr<'a> {
     }
 
     // Perform beta-reduction.
-    pub fn eval(&mut self) -> Result<&'_ mut Self, String> {
+    pub fn eval(&mut self) -> Result<&'_ mut Expr, String> {
         let mut eval_stack: Vec<&mut Expr> = Vec::new();
         let mut curr: &mut Expr = self;
         let mut i = 0;
@@ -71,7 +71,7 @@ impl<'a> Expr<'a> {
     }
 
     #[inline]
-    fn unwrap_appl(self) -> (Box<Expr<'a>>, Box<Expr<'a>>) {
+    fn unwrap_appl(self) -> (Box<Expr>, Box<Expr>) {
         if let Expr::Appl { f, arg } = self {
             (f, arg)
         } else {
@@ -80,7 +80,7 @@ impl<'a> Expr<'a> {
     }
 
     #[inline]
-    fn unwrap_lambda(self) -> (usize, Box<Expr<'a>>) {
+    fn unwrap_lambda(self) -> (usize, Box<Expr>) {
         if let Expr::Lambda { param, expr } = self {
             (param, expr)
         } else {
@@ -89,13 +89,13 @@ impl<'a> Expr<'a> {
     }
 }
 
-impl<'a> std::fmt::Display for Expr<'a> {
+impl<'a> std::fmt::Display for Expr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Expr::Lambda { param, expr }    => write!(f, "{}. {}", Expr::Var(*param), expr),
-            Expr::Appl { f: func, arg } => {
+            Expr::Lambda { param, expr } => write!(f, "{}. {}", Expr::Var(*param), expr),
+            Expr::Appl { f: func, arg }  => {
                 match func.as_ref() {
-                    Expr::Lambda { .. } => write!(f, "({})", func),
+                    Expr::Lambda { .. }  => write!(f, "({})", func),
                     _ => write!(f, "{}", func),
                 }?;
                 write!(f, " ")?;
@@ -107,5 +107,27 @@ impl<'a> std::fmt::Display for Expr<'a> {
             Expr::Var(v)            => write!(f, "{}", (*v as u8 + 97) as char),
             Expr::Literal(s)        => write!(f, "\"{}\"", s),
         }
+    }
+}
+
+pub fn print_expr(expr: &Expr, mem_static: &Vec<String>) {
+    match expr {
+        Expr::Lambda { param, expr } => println!("{}. {}", Expr::Var(*param), expr),
+        Expr::Appl { f: func, arg }  => {
+            match func.as_ref() {
+                Expr::Lambda { .. } => println!("({})", func),
+                _                   => println!("{}", func),
+            };
+
+            println!(" ");
+
+            match arg.as_ref() {
+                Expr::Lambda { .. } |
+                Expr::Appl { .. }    => println!("({})", arg),
+                _                    => println!("{}", arg),
+            }
+        },
+        Expr::Var(v)     => println!("{}", (*v as u8 + 97) as char),
+        Expr::Literal(i) => println!("\"{}\"", mem_static[*i]),
     }
 }
