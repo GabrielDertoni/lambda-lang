@@ -100,7 +100,9 @@ impl<'a> ParseStream<'a> {
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.remaining.get().len() == 0
+        self.get_remaining()
+            .chars()
+            .all(char::is_whitespace)
     }
 
     #[inline]
@@ -117,18 +119,18 @@ impl<'a> From<&'a str> for ParseStream<'a> {
 
 
 pub trait Parser: Sized {
-    fn parse<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> Result<Self>;
+    fn parse<'tok>(input: &ParseStream<'tok>) -> Result<Self>;
 }
 
 impl<T: Parser> Parser for Box<T> {
-    fn parse<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> Result<Box<T>> {
+    fn parse<'tok>(input: &ParseStream<'tok>) -> Result<Box<T>> {
         Ok(Box::new(input.parse()?))
     }
 }
 
 
 impl Parser for Program {
-    fn parse<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> Result<Program> {
+    fn parse<'tok>(input: &ParseStream<'tok>) -> Result<Program> {
         let s = input.get_remaining();
         let mut stmts = Vec::new();
 
@@ -148,7 +150,7 @@ impl Parser for Program {
 }
 
 impl Parser for Stmt {
-    fn parse<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> Result<Stmt> {
+    fn parse<'tok>(input: &ParseStream<'tok>) -> Result<Stmt> {
         input.parse()
             .map(|macro_def| Stmt::Macro(macro_def))
             .or_else(|_| Ok(Stmt::Expr(input.parse()?)))
@@ -156,7 +158,7 @@ impl Parser for Stmt {
 }
 
 impl Parser for Macro {
-    fn parse<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> Result<Macro> {
+    fn parse<'tok>(input: &ParseStream<'tok>) -> Result<Macro> {
         Ok(Macro {
             def_token: input.parse()?,
             name: input.parse()?,
@@ -167,7 +169,7 @@ impl Parser for Macro {
 }
 
 impl Parser for Expr {
-    fn parse<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> Result<Expr> {
+    fn parse<'tok>(input: &ParseStream<'tok>) -> Result<Expr> {
         input.skip_whitespace();
 
         let peek_stream = input.fork();
@@ -179,19 +181,17 @@ impl Parser for Expr {
             Ok(Expr::Lambda(lamb))
         } else {
             let lhs = input.parse()?;
-            input.skip_whitespace();
             if input.is_empty() {
                 Ok(Expr::Close(lhs))
             } else {
-                let rhs = input.parse()?;
-                Ok(Expr::Appl(Appl { lhs, rhs }))
+                Ok(Expr::Appl(parse_appl_with_lhs(input, lhs)?))
             }
         }
     }
 }
 
 impl Parser for Lambda {
-    fn parse<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> Result<Lambda> {
+    fn parse<'tok>(input: &ParseStream<'tok>) -> Result<Lambda> {
         Ok(Lambda {
             lambda_token: input.parse()?,
             var: input.parse()?,
@@ -202,16 +202,30 @@ impl Parser for Lambda {
 }
 
 impl Parser for Appl {
-    fn parse<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> Result<Appl> {
-        Ok(Appl {
-            rhs: input.parse()?,
-            lhs: input.parse()?,
-        })
+    fn parse<'tok>(input: &ParseStream<'tok>) -> Result<Appl> {
+        let lhs = input.parse()?;
+        parse_appl_with_lhs(input, lhs)
     }
 }
 
+fn parse_appl_with_lhs<'tok>(input: &ParseStream<'tok>, lhs: Close) -> Result<Appl> {
+        let mut root = Appl {
+            lhs,
+            rhs: input.parse()?,
+        };
+
+        while !input.is_empty() {
+            let rhs = input.parse()?;
+            root = Appl {
+                lhs: Close::Paren(Box::new(Expr::Appl(root))),
+                rhs,
+            };
+        }
+        Ok(root)
+}
+
 impl Parser for Close {
-    fn parse<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> Result<Close> {
+    fn parse<'tok>(input: &ParseStream<'tok>) -> Result<Close> {
         let lookahead = input.fork();
 
         Ok(if tokens::LParen::parse(&lookahead).is_ok() {
@@ -232,37 +246,44 @@ mod test {
     use super::*;
 
     #[test]
+    fn test_multiple_appl() {
+        let stream = ParseStream::from("(\\a. a) (\\a. a) \"hello\"");
+        assert!(Appl::parse(&stream).is_ok());
+        assert!(stream.is_empty(), "remaining: {}", stream.get_remaining());
+    }
+
+    #[test]
     fn test_parse_stmt() {
         let stream = ParseStream::from("\\a. a a");
         assert!(Stmt::parse(&stream).is_ok());
-        assert!(stream.is_empty(), "remaining: {}", stream.remaining.get());
+        assert!(stream.is_empty(), "remaining: {}", stream.get_remaining());
     }
 
     #[test]
     fn test_literal_parser() {
         let stream = ParseStream::from("\\a. a a");
         assert!(Expr::parse(&stream).is_ok());
-        assert!(stream.is_empty(), "remaining: {}", stream.remaining.get());
+        assert!(stream.is_empty(), "remaining: {}", stream.get_remaining());
     }
 
     #[test]
     fn test_paren() {
         let stream = ParseStream::from("(\\a. a a)");
         assert!(Expr::parse(&stream).is_ok());
-        assert!(stream.is_empty(), "remaining: {}", stream.remaining.get());
+        assert!(stream.is_empty(), "remaining: {}", stream.get_remaining());
     }
 
     #[test]
     fn test_var() {
         let stream = ParseStream::from("a");
         assert!(tokens::Var::parse(&stream).is_ok());
-        assert!(stream.is_empty(), "remaining: {}", stream.remaining.get());
+        assert!(stream.is_empty(), "remaining: {}", stream.get_remaining());
     }
 
     #[test]
     fn test_literal() {
         let stream = ParseStream::from("\"hello world\"");
         assert!(tokens::Literal::parse(&stream).is_ok());
-        assert!(stream.is_empty(), "remaining: {}", stream.remaining.get());
+        assert!(stream.is_empty(), "remaining: {}", stream.get_remaining());
     }
 }

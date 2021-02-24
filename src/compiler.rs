@@ -1,43 +1,33 @@
 use std::collections::{ HashMap, HashSet, VecDeque };
+use std::rc::Rc;
 
 use crate::parser;
 use crate::parser::{ Result, Parser };
 use crate::parser::ast;
 use crate::parser::error::Error;
+use crate::interpreter::{ Expr, Executable, Macro };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Expr {
-    Lambda {
-        param: usize,
-        expr: Box<Expr>,
-    },
-    Appl {
-        f: Box<Expr>,
-        arg: Box<Expr>,
-    },
-    Var(usize),
-    Literal(usize),
-}
-
-pub fn compile_program(s: &str, mem_static: &mut Vec<String>) -> Result<Expr> {
+pub fn compile_program(s: &str) -> Result<Executable> {
     let stream = parser::ParseStream::from(s);
     let ast = ast::Program::parse(&stream)?;
 
     let literals = alloc_prog_literals(&ast);
-    mem_static.extend(literals);
 
     // TODO: Allow loop macros like A refer to B and B refer to A
     let mut macros = HashMap::new();
     for (i, stmt) in ast.stmts.iter().enumerate() {
-        let mut compiler = Compiler::new(mem_static, &macros);
+        let mut compiler = Compiler::new(&literals, &macros);
         match stmt {
             ast::Stmt::Macro(mac) => {
                 let compiled = compiler.compile_expr(&mac.value)?;
-                macros.insert(mac.name.name.to_owned(), compiled);
+                let name = mac.name.name.clone();
+                let name_ptr = std::ptr::NonNull::from(name.as_ref());
+                macros.insert(name, Rc::new(Macro::new(compiled, name_ptr)));
             },
             ast::Stmt::Expr(expr) => {
                 assert!(i == ast.stmts.len() - 1);
-                return Ok(compiler.compile_expr(expr)?);
+                let compiled = compiler.compile_expr(expr)?;
+                return Ok(Executable::new(compiled, macros, literals));
             }
         }
     }
@@ -52,22 +42,22 @@ pub enum StmtReturn {
 
 pub fn compile_stmt(
     s: &str,
-    mem_static: &mut Vec<String>,
-    macros: &mut HashMap<String, Expr>
+    literals: &mut HashSet<Rc<String>>,
+    macros: &mut HashMap<String, Rc<Macro>>
 ) -> Result<StmtReturn>
 {
     let stream = parser::ParseStream::from(s);
     let stmt = ast::Stmt::parse(&stream)?;
 
-    let mut literals = HashSet::new();
-    alloc_stmt_literals(&stmt, &mut literals);
-    mem_static.extend(literals);
+    alloc_stmt_literals(&stmt, literals);
 
-    let mut compiler = Compiler::new(mem_static, &macros);
+    let mut compiler = Compiler::new(literals, &macros);
     match stmt {
         ast::Stmt::Macro(mac) => {
             let compiled = compiler.compile_expr(&mac.value)?;
-            macros.insert(mac.name.name.to_owned(), compiled);
+            let name = mac.name.name.clone();
+            let name_ptr = std::ptr::NonNull::from(name.as_ref());
+            macros.insert(name, Rc::new(Macro::new(compiled, name_ptr)));
             Ok(StmtReturn::Macro(mac.name.name.to_owned()))
         },
         ast::Stmt::Expr(expr) => {
@@ -78,7 +68,7 @@ pub fn compile_stmt(
 
 // Traverses the entire AST and finds all string literals in the program and
 // copies them into a vector.
-pub fn alloc_prog_literals(prog: &ast::Program) -> HashSet<String> {
+pub fn alloc_prog_literals(prog: &ast::Program) -> HashSet<Rc<String>> {
     let mut literals = HashSet::new();
 
     for stmt in prog.stmts.iter() {
@@ -88,7 +78,7 @@ pub fn alloc_prog_literals(prog: &ast::Program) -> HashSet<String> {
     literals
 }
 
-fn alloc_stmt_literals(stmt: &ast::Stmt, literals: &mut HashSet<String>) {
+fn alloc_stmt_literals(stmt: &ast::Stmt, literals: &mut HashSet<Rc<String>>) {
     let mut expr_queue = VecDeque::new();
 
     let expr = match stmt {
@@ -112,12 +102,14 @@ fn alloc_stmt_literals(stmt: &ast::Stmt, literals: &mut HashSet<String>) {
 #[inline]
 fn alloc_close_literals<'a>(
     close: &'a ast::Close,
-    literals: &mut HashSet<String>,
+    literals: &mut HashSet<Rc<String>>,
     expr_queue: &mut VecDeque<&'a ast::Expr>
 ) {
     match close {
         ast::Close::Paren(e)     => expr_queue.push_back(e.as_ref()),
-        ast::Close::Literal(lit) => { literals.insert(lit.content.clone()); },
+        ast::Close::Literal(lit) => {
+            literals.insert(Rc::new(lit.content.clone()));
+        },
         ast::Close::Var(_)       => (),
     }
 }
@@ -131,14 +123,14 @@ fn alloc_close_literals<'a>(
  * into 'lit and 'expr will usualy be used to create get a refenrece into 'lit.
  */
 struct Compiler<'expr, 'lit> {
-    literals: &'lit Vec<String>,
-    macros: &'lit HashMap<String, Expr>,
+    literals: &'lit HashSet<Rc<String>>,
+    macros: &'lit HashMap<String, Rc<Macro>>,
     var_name_to_id: HashMap<&'expr str, usize>,
 }
 
 impl<'expr, 'lit> Compiler<'expr, 'lit> {
-    fn new(literals: &'lit Vec<String>, macros: &'lit HashMap<String, Expr>) -> Compiler<'expr, 'lit> {
-        Compiler { literals, var_name_to_id: HashMap::new(), macros }
+    fn new(literals: &'lit HashSet<Rc<String>>, macros: &'lit HashMap<String, Rc<Macro>>) -> Compiler<'expr, 'lit> {
+        Compiler { literals, macros, var_name_to_id: HashMap::new() }
     }
 
     fn compile_expr(&mut self, expr: &'expr ast::Expr) -> Result<Expr> {
@@ -180,20 +172,15 @@ impl<'expr, 'lit> Compiler<'expr, 'lit> {
                     None          => {
                         let mac = self.macros
                             .get(&var.name)
-                            .ok_or_else(|| Error::new(var.span, "Use of undeclared variable or macro"))?
-                            .to_owned();
+                            .ok_or_else(|| Error::new(var.span, "Use of undeclared variable or macro"))?;
 
-                        mac
+                        Expr::MacroRef(Rc::clone(mac))
                     },
                 }
             },
             ast::Close::Literal(lit) => {
-                let s = self.literals
-                    .iter()
-                    .position(|el| el == &lit.content)
-                    .unwrap();
-
-                Expr::Literal(s)
+                let s = self.literals.get(&lit.content).unwrap();
+                Expr::Literal(Rc::clone(s))
             },
         })
     }
@@ -206,7 +193,6 @@ mod test {
     #[test]
     fn test_compilation() {
         let input = "(\\a. a a) (\\a. a a)";
-        let mut heap = Vec::new();
-        assert!(compile_program(input, &mut heap).is_ok());
+        assert!(compile_program(input).is_ok());
     }
 }

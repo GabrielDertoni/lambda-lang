@@ -24,7 +24,7 @@ macro_rules! define_token_structs {
         define_token_struct!(pub struct $tok);
 
         impl Parser for $tok {
-            fn parse<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> Result<$tok> {
+            fn parse<'tok>(input: &ParseStream<'tok>) -> Result<$tok> {
                 input.skip_whitespace();
 
                 let span = input.curr_span();
@@ -44,7 +44,7 @@ macro_rules! define_token_structs {
         define_token_struct!(pub struct $tok);
 
         impl Parser for $tok {
-            fn parse<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> Result<$tok> {
+            fn parse<'tok>(input: &ParseStream<'tok>) -> Result<$tok> {
                 input.skip_whitespace();
 
                 let mut count = 0;
@@ -93,7 +93,7 @@ impl Def {
 }
 
 impl Parser for Def {
-    fn parse<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> Result<Def> {
+    fn parse<'tok>(input: &ParseStream<'tok>) -> Result<Def> {
         input.skip_whitespace();
         let span = input.curr_span();
         let tok = input
@@ -143,7 +143,7 @@ impl Paren {
     }
 }
 
-fn skip_string<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> usize {
+fn skip_string<'tok>(input: &ParseStream<'tok>) -> usize {
     let mut count = 0;
     assert!(input.get().unwrap() == '"');
     while let Some(c) = input.get() {
@@ -160,7 +160,7 @@ fn skip_string<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> usize {
     count
 }
 
-fn skip_until_paren<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> usize {
+fn skip_until_paren<'tok>(input: &ParseStream<'tok>) -> usize {
     let mut count = 0;
     while let Some(c) = input.get() {
         if c == '(' || c == ')' {
@@ -174,7 +174,7 @@ fn skip_until_paren<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> usize {
     count
 }
 
-pub fn parse_parenthesis<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> Result<(ParseStream<'tok>, Paren)> {
+pub fn parse_parenthesis<'tok>(input: &ParseStream<'tok>) -> Result<(ParseStream<'tok>, Paren)> {
     let mut depth = 0;
     let original = input.get_remaining();
     let start = input.curr_span().start();
@@ -205,7 +205,7 @@ pub fn parse_parenthesis<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> Result<(
 }
 
 impl Parser for Var {
-    fn parse<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> Result<Var> {
+    fn parse<'tok>(input: &ParseStream<'tok>) -> Result<Var> {
         input.skip_whitespace();
         let span = input.curr_span();
         let mut content = String::new();
@@ -227,7 +227,7 @@ impl Parser for Var {
 }
 
 impl Parser for Literal {
-    fn parse<'a, 'tok: 'a>(input: &'a ParseStream<'tok>) -> Result<Literal> {
+    fn parse<'tok>(input: &ParseStream<'tok>) -> Result<Literal> {
         input.skip_whitespace();
         let span = input.curr_span();
         let mut content = String::new();
