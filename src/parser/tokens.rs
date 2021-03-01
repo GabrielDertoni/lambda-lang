@@ -32,7 +32,7 @@ macro_rules! define_token_structs {
                     input.advance();
                     Ok($tok::new(span.with_width(1)))
                 } else {
-                    Err(Error::new(span.start(), "Error, expected token Dot"))
+                    Err(Error::new(span.start(), format!("Error, expected token {}", stringify!($tok))))
                 }
             }
         }
@@ -175,6 +175,8 @@ fn skip_until_paren<'tok>(input: &ParseStream<'tok>) -> usize {
 }
 
 pub fn parse_parenthesis<'tok>(input: &ParseStream<'tok>) -> Result<(ParseStream<'tok>, Paren)> {
+    input.skip_whitespace();
+
     let mut depth = 0;
     let original = input.get_remaining();
     let start = input.curr_span().start();

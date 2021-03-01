@@ -5,12 +5,32 @@ pub mod span;
 
 
 use std::cell::Cell;
+use std::any::Any;
 
 use ast::*;
 use error::*;
 use span::*;
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+trait AnyClonable: Any {
+    fn any_clone(&self) -> Box<dyn AnyClonable>;
+}
+
+impl<T> AnyClonable for T
+where
+    T: Any + Clone,
+{
+    fn any_clone(&self) -> Box<dyn AnyClonable> {
+        Box::new(self.clone())
+    }
+}
+
+impl Clone for Box<dyn AnyClonable> {
+    fn clone(&self) -> Box<dyn AnyClonable> {
+        self.any_clone()
+    }
+}
 
 #[derive(Clone)]
 pub struct ParseStream<'a> {
@@ -74,6 +94,29 @@ impl<'a> ParseStream<'a> {
         self.get()
     }
 
+
+    pub fn get_line_column_number(&self, span: Span) -> (usize, usize) {
+        for (i, line) in self.line_spans().into_iter().enumerate() {
+            if line.contains(span.start()) {
+                return (i, span.start - line.start)
+            }
+        }
+        panic!("Unable to get line and column number")
+    }
+
+    fn line_spans(&self) -> Vec<Span> {
+        let mut span = Span::new(0, self.original.len());
+        let mut lines = Vec::new();
+
+        for line in self.original.lines() {
+            lines.push(span.with_width(line.len()));
+            span.start += line.len() + 1;
+        }
+
+        lines
+    }
+
+    #[inline]
     pub fn fork(&self) -> ParseStream<'a> {
         self.clone()
     }

@@ -1,7 +1,7 @@
 use super::span::Span;
 
 pub struct Error {
-    messages: Vec<ErrorMessage>,
+    pub messages: Vec<ErrorMessage>,
 }
 
 impl Error {
@@ -26,9 +26,9 @@ impl std::fmt::Debug for Error {
     }
 }
 
-struct ErrorMessage {
-    span: Span,
-    message: String,
+pub struct ErrorMessage {
+    pub span: Span,
+    pub message: String,
 }
 
 impl ErrorMessage {

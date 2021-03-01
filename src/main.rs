@@ -6,25 +6,26 @@
 #![feature(box_patterns)]
 #![feature(bindings_after_at)]
 
-use std::collections::{ HashMap, HashSet };
-use rustyline::error::ReadlineError;
-use rustyline::Editor;
-
 mod interpreter;
 mod compiler;
 mod parser;
 mod utils;
 
+// TODO: Maybe will became a submodule somewhere.
+// mod thunk;
+
+use std::collections::{ HashMap, HashSet };
+use rustyline::error::ReadlineError;
+use rustyline::Editor;
+
 use crate::compiler::{ compile_stmt, StmtReturn };
-// use crate::interpreter::print_expr;
 
 fn main() -> std::io::Result<()> {
-    // let args: Vec<String> = std::env::args().collect();
-
     let mut literals = HashSet::new();
     let mut macros = HashMap::new();
 
     let mut rl = Editor::<()>::new();
+    let _ = rl.load_history(".lambda");
 
     loop {
         let readline = rl.readline(">> ");
@@ -37,11 +38,30 @@ fn main() -> std::io::Result<()> {
                     Ok(StmtReturn::Expr(mut expr)) => {
                         match expr.eval() {
                             Ok(res)  => println!("{}", res),
-                            Err(err) => println!("RuntimeError:\n\t{}", err),
+                            Err(err) => {
+                                eprintln!("RuntimeError:\n\t{}", err);
+                                eprintln!("Error occurred at: {}", expr);
+                            },
                         }
                     },
-                    Err(err) => println!("{:?}", err),
+                    Err(err) => {
+                        for e in err.messages {
+                            eprintln!("Compiler Error:\n");
+                            eprintln!("\t{}", line);
+                            let start = e.span.start;
+                            let spaces: String = std::iter::repeat(' ')
+                                .take(start)
+                                .collect();
+
+                            let up_arrow: String = std::iter::repeat('^')
+                                .take(e.span.width())
+                                .collect();
+
+                            eprintln!("\t{}{} {}", spaces, up_arrow, e.message.to_lowercase());
+                        }
+                    },
                 }
+                rl.save_history(".lambda").unwrap();
             },
             Err(ReadlineError::Interrupted) => {
                 println!("CTRL-C");
@@ -56,27 +76,7 @@ fn main() -> std::io::Result<()> {
             }
         }
     }
-
-    /*
-    let fname = &args[1];
-    let content = std::fs::read_to_string(fname)?;
-
-    let mut mem_static = Vec::new();
-
-    let mut compiled = match compile_program(&content, &mut mem_static) {
-        Ok(comp) => comp,
-        Err(err) => {
-            println!("{}", err);
-            return Ok(());
-        },
-    };
-
-    match compiled.eval() {
-        Ok(res)  => println!("{:#?}", res),
-        Err(err) => println!("RuntimeError:\n\t{}", err),
-    }
-    */
-
+    rl.save_history(".lambda").unwrap();
     Ok(())
 }
 

@@ -1,13 +1,43 @@
 
+pub mod error;
+
 use std::collections::{ HashSet, HashMap };
 use std::rc::Rc;
 use std::ptr::NonNull;
 
+pub use error::RuntimeError;
+
 const MAX_EVAL_DEPTH: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Expr {
+    Lambda {
+        param: usize,
+        expr: Box<Expr>,
+    },
+    Appl {
+        f: Box<Expr>,
+        arg: Box<Expr>,
+    },
+    MacroRef(Rc<Macro>),
+    Var(usize),
+    Literal(Rc<String>),
+    Nothing,
+}
 
 pub struct Macro {
     pub expr: Expr,
     name: NonNull<str>,
+}
+
+impl Macro {
+    pub fn new(expr: Expr, name: NonNull<str>) -> Macro {
+        Macro { expr, name }
+    }
+
+    unsafe fn get_name(&self) -> &str {
+        self.name.as_ref()
+    }
 }
 
 impl PartialEq for Macro {
@@ -25,54 +55,11 @@ impl std::fmt::Debug for Macro {
 
 impl Eq for Macro {}
 
-impl Macro {
-    pub fn new(expr: Expr, name: NonNull<str>) -> Macro {
-        Macro { expr, name }
-    }
-}
-
 pub struct Executable {
     pub expr: Expr,
     // No entries should be removed from this hashmap.
     pub macros: HashMap<String, Rc<Macro>>,
     pub literals: HashSet<Rc<String>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Expr {
-    Lambda {
-        param: usize,
-        expr: Box<Expr>,
-    },
-    Appl {
-        f: Box<Expr>,
-        arg: Box<Expr>,
-    },
-    MacroRef(Rc<Macro>),
-    Var(usize),
-    Literal(Rc<String>),
-}
-
-#[derive(Debug)]
-pub enum RuntimeError {
-    Unknown,
-    RecursionDepthExceeded,
-}
-
-impl RuntimeError {
-    pub fn new() -> RuntimeError {
-        RuntimeError::Unknown
-    }
-}
-
-use std::fmt::{ Display, Formatter };
-impl Display for RuntimeError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RuntimeError::Unknown                => write!(f, "Unknown error"),
-            RuntimeError::RecursionDepthExceeded => write!(f, "Recursion depth exceeded"),
-        }
-    }
 }
 
 impl Executable {
@@ -100,49 +87,150 @@ fn memapply<T, F: FnOnce(T) -> T>(dest: &mut T, f: F) {
     }
 }
 
+
+use std::borrow::Cow;
 impl Expr {
-    // Perform beta-reduction.
-    pub fn eval(&mut self) -> Result<&mut Expr, RuntimeError> {
-        self.eval_depth(0)
+    /// Verifies if an expression is in Weak Head Normal Form.
+    /// An expression is in WHNF if all of the "left hand side" things are
+    /// evaluated.
+    pub fn is_whnf(&self) -> bool {
+        let mut next = Some(self);
+        while let Some(curr) = next.take() {
+            match curr {
+                Expr::Nothing    |
+                Expr::Literal(_) |
+                Expr::Var(_)           => return true,
+                Expr::Appl { f, .. }   => next = Some(f),
+                Expr::MacroRef(mac)    => next = Some(&mac.as_ref().expr),
+                lamb@Expr::Lambda {..} 
+                    if lamb.is_n_reducible() => return false,
+                _                            => return true,
+            }
+        }
+        return false;
     }
 
-    pub fn eval_depth(&mut self, depth: usize) -> Result<&mut Expr, RuntimeError> {
+    /// Verifies if an expression is n-reducible.
+    /// An expression is n-reducible in case it is an expression like \a. f a.
+    /// In this case, the n-reduction would be \a. f a -> f, meaning that the
+    /// initial expression was n-reducible.
+    pub fn is_n_reducible(&self) -> bool {
+        match self {
+            Expr::Lambda {
+                param,
+                expr: box Expr::Appl {
+                    arg: box Expr::Var(arg_var),
+                    ..
+                },
+            } if param == arg_var => true,
+            _                     => false,
+        }
+    }
+
+    pub fn is_normal_form(&self) -> bool {
+        match self {
+            Expr::Nothing    |
+            Expr::Literal(_) |
+            Expr::Var(_)                 => true,
+            Expr::Appl { f, arg }        => f.is_normal_form() && arg.is_normal_form(),
+            Expr::MacroRef(mac)          => mac.as_ref().expr.is_normal_form(),
+            lamb@Expr::Lambda {..}
+                if lamb.is_n_reducible() => false,
+            Expr::Lambda{..}             => true,
+        }
+    }
+
+    /// Converts all used variables so that the ones in the top of the tree will
+    /// start at 0 and increase in valua as they go down the expression tree.
+    /// This is necessary in order to compare two different expressions.
+    pub fn alpha_convert(&mut self) {
+        // Cow is used so the vec is not cloned unless it is really needed.
+        let conversion_table = Cow::Owned(Vec::new());
+        self.alpha_convert_with_table(conversion_table);
+    }
+
+    fn alpha_convert_with_table(&mut self, mut conversion_table: Cow<Vec<usize>>) {
+        match self {
+            Expr::Literal(_)  |
+            Expr::MacroRef(_) | // Macros are already always alpha simplified.
+            Expr::Nothing         => (),
+            Expr::Appl { f, arg } => {
+                // This clone is necessary because we can't let the local
+                // variables that may be defined in expression `f` to be used
+                // in the `arg` expression.
+                f.alpha_convert_with_table(conversion_table.clone());
+                arg.alpha_convert_with_table(conversion_table);
+            },
+            Expr::Lambda { param, expr } => {
+                // This is ok because a new parameter found in the tree will
+                // always have a larger value then its predecessors, so the
+                // `conversion_table` will remain sorted.
+                conversion_table.to_mut().push(*param);
+                expr.alpha_convert_with_table(conversion_table);
+            },
+            Expr::Var(v) => {
+                let pos = conversion_table
+                    .binary_search(v)
+                    .expect("Found var not present in conversion table.");
+
+                *v = pos;
+            },
+        }
+    }
+
+    // Perform beta-reduction.
+    pub fn eval(&mut self) -> Result<&mut Expr, RuntimeError> {
+        self.eval_depth(0, false)
+    }
+
+    pub fn eval_depth(&mut self, depth: usize, eval_macros: bool) -> Result<&mut Expr, RuntimeError> {
         if depth > MAX_EVAL_DEPTH {
             return Err(RuntimeError::RecursionDepthExceeded);
         }
 
-        match self {
-            Expr::Literal(_) |
-            Expr::Var(_)              => return Ok(self),
-            Expr::Lambda { expr, .. } => {
-                expr.eval_depth(depth + 1)?;
-                return Ok(self);
-            },
-            Expr::Appl { f, .. }      => {
-                f.eval_depth(depth + 1)?;
-                memapply(self, |owned| match owned {
-                    Expr::Appl {
+        for _ in 0..MAX_EVAL_DEPTH {
+            match self {
+                Expr::Literal(_) |
+                Expr::Var(_)              => return Ok(self),
+                Expr::Lambda { expr, .. } => {
+                    expr.eval_depth(depth + 1, eval_macros)?;
+                    return Ok(self);
+                },
+                Expr::Appl { f, .. }      => {
+                    f.eval_depth(depth + 1, true)?;
+                    let owned = self.take();
+                    if let Expr::Appl {
                         f: box Expr::Lambda {
                             param,
-                            mut expr
+                            box mut expr
                         },
                         arg
-                    } => {
+                    } = owned {
                         expr.subst(param, *arg);
-                        *expr
-                    },
-                    _ => owned,
-                });
-            },
-            Expr::MacroRef(ptr) => {
-                let mut expr = ptr.expr.clone();
-                // Q: Should this type of evaluation increase the evaluation depth?
-                expr.eval_depth(depth + 1)?;
-                drop(std::mem::replace(self, expr));
+                        drop(self.replace(expr));
+                    } else {
+                        drop(self.replace(owned));
+                        return Ok(self);
+                    }
+                },
+                Expr::MacroRef(ptr) => {
+                    if !ptr.as_ref().expr.is_normal_form() || eval_macros {
+                        let mut expr = ptr.expr.clone();
+                        // Q: Should this type of evaluation increase the evaluation depth?
+                        expr.eval_depth(depth, eval_macros)?;
+                        drop(std::mem::replace(self, expr));
+                    } else {
+                        return Ok(self);
+                    }
+                },
+                Expr::Nothing => {
+                    return Err(RuntimeError::NothingEval);
+                }
             }
         }
-        self.eval_depth(depth + 1)?;
-        Ok(self)
+        // self.eval_depth(depth + 1)?;
+        // Ok(self)
+        return Err(RuntimeError::IterationExceeded);
     }
 
     fn subst(&mut self, var: usize, new_expr: Expr) {
@@ -152,20 +240,35 @@ impl Expr {
                 f.subst(var, new_expr.clone());
                 arg.subst(var, new_expr);
             },
-            Expr::Var(v)         => if *v == var { *self = new_expr },
-            Expr::Literal(_)     => (),
             Expr::MacroRef(ptr)  => {
                 let mut expr = ptr.expr.clone();
                 expr.subst(var, new_expr);
             }
+            Expr::Var(v)         => if *v == var { *self = new_expr },
+            Expr::Literal(_) |
+            Expr::Nothing        => (),
         }
     }
 }
 
-impl<'a> std::fmt::Display for Expr {
+// Pure implementations (no mutation, lots of cloning)
+impl Expr {
+    pub fn pure_alpha_convert(&self) -> Expr {
+        let mut clone = self.clone();
+        clone.alpha_convert();
+        clone
+    }
+}
+
+impl std::fmt::Display for Expr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Expr::Lambda { param, expr } => write!(f, "{}. {}", Expr::Var(*param), expr),
+            Expr::Lambda { param, expr } => write!(f, "λ{}. {}", Expr::Var(*param), expr),
+            Expr::Appl {
+                f: box Expr::Literal(a),
+                arg: box Expr::Literal(b),
+            } => write!(f, "\"{}{}\"", a.as_ref(), b.as_ref()),
+            
             Expr::Appl { f: func, arg }  => {
                 match func.as_ref() {
                     Expr::Lambda { .. }  => write!(f, "({})", func),
@@ -183,6 +286,23 @@ impl<'a> std::fmt::Display for Expr {
                 let name = unsafe { &ptr.as_ref().name.as_ref() };
                 write!(f, "{}", name)
             }
+            Expr::Nothing           => write!(f, "[nothing expression]"),
         }
+    }
+}
+
+impl std::default::Default for Expr {
+    fn default() -> Expr {
+        Expr::Nothing
+    }
+}
+
+impl Expr {
+    pub fn take(&mut self) -> Expr {
+        std::mem::take(self)
+    }
+
+    pub fn replace(&mut self, expr: Expr) -> Expr {
+        std::mem::replace(self, expr)
     }
 }

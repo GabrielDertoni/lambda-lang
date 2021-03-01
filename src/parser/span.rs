@@ -39,6 +39,11 @@ impl Span {
         assert!(self.width() >= width);
         Span { start: self.start, end: self.start + width }
     }
+
+    #[inline]
+    pub fn contains(&self, other: Span) -> bool {
+        self.start <= other.start && self.end >= other.end
+    }
 }
 
 impl<'a> From<&'a str> for Span {
