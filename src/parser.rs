@@ -2,40 +2,27 @@ pub mod ast;
 pub mod tokens;
 pub mod error;
 pub mod span;
+pub mod parser_cache;
 
 
+use std::any::{ Any, TypeId };
+use std::collections::HashMap;
 use std::cell::Cell;
-use std::any::Any;
+use std::rc::Rc;
+use std::cell::{ RefCell, RefMut };
 
 use ast::*;
 use error::*;
 use span::*;
+use parser_cache::{ ParserCache, ParsedType };
 
 pub type Result<T> = std::result::Result<T, Error>;
-
-trait AnyClonable: Any {
-    fn any_clone(&self) -> Box<dyn AnyClonable>;
-}
-
-impl<T> AnyClonable for T
-where
-    T: Any + Clone,
-{
-    fn any_clone(&self) -> Box<dyn AnyClonable> {
-        Box::new(self.clone())
-    }
-}
-
-impl Clone for Box<dyn AnyClonable> {
-    fn clone(&self) -> Box<dyn AnyClonable> {
-        self.any_clone()
-    }
-}
 
 #[derive(Clone)]
 pub struct ParseStream<'a> {
     pub scope: Span,
     curr_span: Cell<Span>,
+    cache: Rc<RefCell<ParserCache>>,
     original: &'a str,
     remaining: Cell<&'a str>,
 }
@@ -45,6 +32,7 @@ impl<'a> ParseStream<'a> {
         ParseStream {
             scope,
             curr_span: Cell::new(scope),
+            cache: Rc::new(RefCell::new(ParserCache::new())),
             original: s,
             remaining: Cell::new(s),
         }
@@ -116,6 +104,45 @@ impl<'a> ParseStream<'a> {
         lines
     }
 
+    fn borrow_mut_cache(&self) -> Result<RefMut<ParserCache>> {
+        self.cache.as_ref()
+            .try_borrow_mut()
+            .map_err(|_|
+                Error::new(
+                    self.scope,
+                    "CompilerError: Failed to borrow mutably the parse cache."
+                )
+            )
+    }
+
+    pub fn parse<T: 'static + Parser>(&self) -> Result<&T> {
+        let type_id = TypeId::of::<T>();
+        let remaining_len = self.get_remaining().len();
+        let cache_ref = self.borrow_mut_cache()?;
+
+        Ok(match cache_ref.get(&remaining_len) {
+            Some(can_be_parsed)
+                if let Some(found) = can_be_parsed.get(&type_id) => found.as_ref(),
+
+            maybe_map => {
+                let parsed = T::parse(self)?;
+                let map = match maybe_map {
+                    Some(map) => map,
+                    None => {
+                        let new_map = HashMap::new();
+                        assert!(cache_ref.insert(remaining_len, new_map).is_none());
+                        cache_ref
+                            .get(&remaining_len)
+                            .unwrap() // Safe: we have just inserted the entry.
+                    }
+                };
+                let after_len = self.get_remaining().len();
+                assert!(map.insert(type_id, ParsedType::new(after_len, parsed)).is_none());
+                map.get(&type_id).unwrap().as_ref()
+            },
+        })
+    }
+
     #[inline]
     pub fn fork(&self) -> ParseStream<'a> {
         self.clone()
@@ -134,11 +161,6 @@ impl<'a> ParseStream<'a> {
     #[inline]
     pub fn peek(&self, n: usize) -> Option<&'a str> {
         self.remaining.get().get(..n)
-    }
-
-    #[inline]
-    pub fn parse<T: Parser>(&self) -> Result<T> {
-        T::parse(self)
     }
 
     #[inline]

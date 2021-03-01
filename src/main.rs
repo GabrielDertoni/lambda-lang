@@ -1,10 +1,12 @@
 #![allow(dead_code)]
+#![allow(incomplete_features)]
 #![feature(array_windows)]
 #![feature(try_trait)]
 #![feature(hash_set_entry)]
 #![feature(str_split_once)]
 #![feature(box_patterns)]
 #![feature(bindings_after_at)]
+#![feature(if_let_guard)]
 
 mod interpreter;
 mod compiler;
