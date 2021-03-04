@@ -1,6 +1,7 @@
 use std::collections::{ HashMap, HashSet, VecDeque };
 use std::rc::Rc;
 
+use crate::span::Span;
 use crate::parser;
 use crate::parser::{ Result, Parser };
 use crate::parser::ast;
@@ -20,9 +21,21 @@ pub fn compile_program(s: &str) -> Result<Executable> {
         match stmt {
             ast::Stmt::Macro(mac) => {
                 let compiled = compiler.compile_expr(&mac.value)?;
-                let name = mac.name.name.clone();
-                let name_ptr = std::ptr::NonNull::from(name.as_ref());
-                macros.insert(name, Rc::new(Macro::new(compiled, name_ptr)));
+                if let Some((key, _)) = macros.get_key_value(&mac.name.name) {
+                    let name_ptr = std::ptr::NonNull::from(key.as_ref());
+                    let new_macro = Rc::new(Macro::new(compiled, name_ptr));
+
+                    // Now we know the key is present. There should be a way to
+                    // get a mutable reference to the value and an imutable 
+                    // reference to the key at the same time.
+                    let prev = macros.get_mut(&mac.name.name).unwrap();
+                    drop(std::mem::replace(prev, new_macro));
+                } else {
+                    let name = mac.name.name.clone();
+                    let name_ptr = std::ptr::NonNull::from(name.as_ref());
+                    let new_macro = Rc::new(Macro::new(compiled, name_ptr));
+                    macros.insert(name, new_macro);
+                }
             },
             ast::Stmt::Expr(expr) => {
                 assert!(i == ast.stmts.len() - 1);
@@ -106,7 +119,7 @@ fn alloc_close_literals<'a>(
     expr_queue: &mut VecDeque<&'a ast::Expr>
 ) {
     match close {
-        ast::Close::Paren(e)     => expr_queue.push_back(e.as_ref()),
+        ast::Close::Grouping(e, _)  => expr_queue.push_back(e.as_ref()),
         ast::Close::Literal(lit) => {
             literals.insert(Rc::new(lit.content.clone()));
         },
@@ -125,7 +138,7 @@ fn alloc_close_literals<'a>(
 struct Compiler<'expr, 'lit> {
     literals: &'lit HashSet<Rc<String>>,
     macros: &'lit HashMap<String, Rc<Macro>>,
-    var_name_to_id: HashMap<&'expr str, usize>,
+    var_name_to_id: HashMap<&'expr str, (usize, Span)>,
 }
 
 impl<'expr, 'lit> Compiler<'expr, 'lit> {
@@ -138,7 +151,12 @@ impl<'expr, 'lit> Compiler<'expr, 'lit> {
         let compiled = match expr {
             ast::Expr::Lambda(lambda) => {
                 let param = self.var_name_to_id.len();
-                assert!(self.var_name_to_id.insert(&lambda.var.name, param).is_none());
+                if let Some(&(_, span)) = self.var_name_to_id.get(&lambda.var.name.as_str()) {
+                    let mut err = Error::new(lambda.var.span, "identifier is already in scope");
+                    err.push(span, "first defined here");
+                    return Err(err);
+                }
+                self.var_name_to_id.insert(&lambda.var.name, (param, lambda.var.span));
                 new_var = Some(&lambda.var.name);
 
                 Expr::Lambda {
@@ -165,14 +183,14 @@ impl<'expr, 'lit> Compiler<'expr, 'lit> {
 
     fn compile_close(&mut self, close: &'expr ast::Close) -> Result<Expr> {
         Ok(match close {
-            ast::Close::Paren(expr) => self.compile_expr(expr.as_ref())?,
+            ast::Close::Grouping(e, _) => self.compile_expr(e.as_ref())?,
             ast::Close::Var(var)    => {
                 match self.var_name_to_id.get(&var.name.as_str()) {
-                    Some(&var_id) => Expr::Var(var_id),
+                    Some(&(var_id, _)) => Expr::Var(var_id),
                     None          => {
                         let mac = self.macros
                             .get(&var.name)
-                            .ok_or_else(|| Error::new(var.span, "Use of undeclared variable or macro"))?;
+                            .ok_or_else(|| Error::new(var.span, "use of undeclared variable or macro"))?;
 
                         Expr::MacroRef(Rc::clone(mac))
                     },

@@ -1,35 +1,46 @@
-use super::{ Parser, Result, ParseStream };
+use super::{ Parser, Spanned, Result, ParseStream };
 use super::error::Error;
-use super::span::Span;
+use crate::span::Span;
 
-macro_rules! define_token_struct {
-    (pub struct $tok:ident) => {
-        #[derive(Debug)]
+macro_rules! define_token_structs {
+    () => {};
+
+    (pub struct $tok:ident, $($rest:tt)*) => {
+        #[derive(Debug, Clone)]
         pub struct $tok {
             pub span: Span,
         }
 
         impl $tok {
-            fn new(span: Span) -> Self {
+            pub fn new(span: Span) -> Self {
                 $tok { span }
             }
         }
-    }
+
+        impl Spanned for $tok {
+            fn span(&self) -> Span {
+                self.span
+            }
+        }
+        
+        define_token_structs! { $($rest)* }
+    };
 }
 
-macro_rules! define_token_structs {
+macro_rules! define_token_rules {
     () => {};
 
-    (once $($patt:literal)|+ => pub struct $tok:ident, $($rest:tt)*) => {
-        define_token_struct!(pub struct $tok);
+    ($($patt:literal)|+ => pub struct $tok:ident, $($rest:tt)*) => {
+        define_token_structs!(pub struct $tok,);
 
         impl Parser for $tok {
             fn parse<'tok>(input: &ParseStream<'tok>) -> Result<$tok> {
                 input.skip_whitespace();
 
                 let span = input.curr_span();
-                if let $(Some($patt))|+ = input.get() {
-                    input.advance();
+                let patts: &[&str] = &[$($patt),+];
+                if let Some(patt) = patts.iter().find(|&p| input.starts_with(p)) {
+                    input.advance_by(patt.len());
                     Ok($tok::new(span.with_width(1)))
                 } else {
                     Err(Error::new(span.start(), format!("Error, expected token {}", stringify!($tok))))
@@ -37,11 +48,11 @@ macro_rules! define_token_structs {
             }
         }
 
-        define_token_structs! { $($rest)* }
+        define_token_rules! { $($rest)* }
     };
 
-    (many $($patt:literal)|+ => pub struct $tok:ident, $($rest:tt)*) => {
-        define_token_struct!(pub struct $tok);
+    ($patt:literal* => pub struct $tok:ident, $($rest:tt)*) => {
+        define_token_structs!(pub struct $tok,);
 
         impl Parser for $tok {
             fn parse<'tok>(input: &ParseStream<'tok>) -> Result<$tok> {
@@ -50,7 +61,7 @@ macro_rules! define_token_structs {
                 let mut count = 0;
                 let mut span = input.curr_span();
 
-                while let $(Some($patt))|+ = input.get() {
+                while let Some($patt) = input.get() {
                     input.advance();
 
                     span = span.merge(input.curr_span());
@@ -60,86 +71,94 @@ macro_rules! define_token_structs {
                 if count > 0 {
                     Ok($tok::new(span.with_width(count)))
                 } else {
-                    Err(Error::new(span.start(), format!("Error, expected token {}", stringify!($tok))))
+                    Err(Error::new(span.start(), format!("expected token {}", stringify!($tok))))
                 }
             }
         }
 
-        define_token_structs! { $($rest)* }
-    }
+        define_token_rules! { $($rest)* }
+    };
+}
+
+define_token_rules! {
+    '\n'*      => pub struct Ln,
+    ' '*       => pub struct Space,
+    "."        => pub struct Dot,
+    "="        => pub struct Equal,
+    "("        => pub struct LParen,
+    ")"        => pub struct RParen,
+    "\""       => pub struct Quote,
+    "\\" | "λ" => pub struct Lambda,
+    "$"        => pub struct EOF,
+    "def"      => pub struct Def,
 }
 
 define_token_structs! {
-    many '\n'       => pub struct Ln,
-    many ' '        => pub struct Space,
-    once '.'        => pub struct Dot,
-    once '='        => pub struct Equal,
-    once '('        => pub struct LParen,
-    once ')'        => pub struct RParen,
-    once '"'        => pub struct Quote,
-    once '\\' | 'λ' => pub struct Lambda,
-    once '$'        => pub struct EOF,
+    pub struct Paren,
 }
 
-#[derive(Debug)]
-pub struct Def {
+#[derive(Debug, Clone)]
+pub enum Delimiter {
+    Paren,
+    None,
+}
+
+#[derive(Debug, Clone)]
+pub struct Group {
+    pub delim: Delimiter,
     pub span: Span,
 }
 
-impl Def {
-    fn new(span: Span) -> Def {
-        Def { span }
-    }
-}
-
-impl Parser for Def {
-    fn parse<'tok>(input: &ParseStream<'tok>) -> Result<Def> {
-        input.skip_whitespace();
-        let span = input.curr_span();
-        let tok = input
-            .peek(4)
-            .ok_or_else(|| Error::new(span.start(), "Expected def token"))?;
-
-        if tok == "def " {
-            input.advance_by(4);
-            Ok(Def::new(span.with_width(3)))
-        } else {
-            Err(Error::new(span.start(), "Expected def token"))
-        }
-    }
-}
-
-#[derive(Debug)]
+// TODO: Change struct name to Ident
+#[derive(Debug, Clone)]
 pub struct Var {
     pub span: Span,
     pub name: String,
 }
 
-impl Var {
-    fn new(span: Span, name: String) -> Var {
-        Var { span, name }
-    }
-}
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Literal {
     pub span: Span,
     pub content: String,
 }
 
+impl Group {
+    pub fn new(span: Span, delim: Delimiter) -> Group {
+        Group { span, delim }
+    }
+
+    pub fn new_unmarked(span: Span) -> Group {
+        Group { span, delim: Delimiter::None }
+    }
+}
+
+impl Spanned for Group {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl Var {
+    pub fn new(span: Span, name: String) -> Var {
+        Var { span, name }
+    }
+}
+
+impl Spanned for Var {
+    fn span(&self) -> Span {
+        self.span
+    }
+}
+
 impl Literal {
-    fn new(span: Span, content: String) -> Literal {
+    pub fn new(span: Span, content: String) -> Literal {
         Literal { span, content }
     }
 }
 
-pub struct Paren {
-    pub span: Span,
-}
-
-impl Paren {
-    fn new(span: Span) -> Paren {
-        Paren { span }
+impl Spanned for Literal {
+    fn span(&self) -> Span {
+        self.span
     }
 }
 
@@ -221,11 +240,31 @@ impl Parser for Var {
             input.advance();
         }
         if content.len() == 0 {
-            Err(Error::new(span.start(), "Expected a variable"))
+            Err(Error::new(span.start(), "Expected an identifier"))
         } else {
             Ok(Var::new(span.with_width(content.len()), content))
         }
     }
+
+    /*
+    fn try_parse<'tok>(input: &ParseStream<'tok>) -> Result<Var> {
+        let special: &[char] = &['\'', '_', '=', '+', '#'];
+        match input.parse() {
+            Ok(v)    => Ok(v),
+            Err(err) => {
+                if let Some(c) = input.get() {
+                    if c.is_numeric() || special.iter().any(|&m| m == c) {
+                        input.advance();
+
+                        // TODO: Remove this recursive call.
+                        return input.try_parse();
+                    }
+                }
+                Err(err)
+            }
+        }
+    }
+    */
 }
 
 impl Parser for Literal {
@@ -239,7 +278,6 @@ impl Parser for Literal {
         while let Some(c) = input.get() {
             if c == '\\' {
                 input.advance();
-                input.skip_whitespace();
                 if let Some(escaped) = input.get() {
                     content.push(escaped);
                 } else {
@@ -251,7 +289,6 @@ impl Parser for Literal {
                 content.push(c);
             }
             input.advance();
-            input.skip_whitespace();
             count += 1;
         }
         Quote::parse(input)?;

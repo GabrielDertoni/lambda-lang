@@ -1,20 +1,19 @@
-
-pub mod error;
-
 use std::collections::{ HashSet, HashMap };
 use std::rc::Rc;
 use std::ptr::NonNull;
 
-pub use error::RuntimeError;
+use crate::error::RuntimeError;
 
 const MAX_EVAL_DEPTH: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
+    // TODO: Allow for a parameter list.
     Lambda {
         param: usize,
         expr: Box<Expr>,
     },
+    // TODO: Make this into a vec of expression
     Appl {
         f: Box<Expr>,
         arg: Box<Expr>,
@@ -144,12 +143,16 @@ impl Expr {
     /// start at 0 and increase in valua as they go down the expression tree.
     /// This is necessary in order to compare two different expressions.
     pub fn alpha_convert(&mut self) {
-        // Cow is used so the vec is not cloned unless it is really needed.
-        let conversion_table = Cow::Owned(Vec::new());
-        self.alpha_convert_with_table(conversion_table);
+        self.alpha_convert_from(0);
     }
 
-    fn alpha_convert_with_table(&mut self, mut conversion_table: Cow<Vec<usize>>) {
+    pub fn alpha_convert_from(&mut self, start: usize) {
+        // Cow is used so the vec is not cloned unless it is really needed.
+        let conversion_table = Cow::Owned(Vec::new());
+        self.alpha_convert_with_table(conversion_table, start);
+    }
+
+    fn alpha_convert_with_table(&mut self, mut conversion_table: Cow<Vec<usize>>, start: usize) {
         match self {
             Expr::Literal(_)  |
             Expr::MacroRef(_) | // Macros are already always alpha simplified.
@@ -158,27 +161,50 @@ impl Expr {
                 // This clone is necessary because we can't let the local
                 // variables that may be defined in expression `f` to be used
                 // in the `arg` expression.
-                f.alpha_convert_with_table(conversion_table.clone());
-                arg.alpha_convert_with_table(conversion_table);
+                f.alpha_convert_with_table(Cow::Borrowed(conversion_table.as_ref()), start);
+                arg.alpha_convert_with_table(conversion_table, start);
             },
             Expr::Lambda { param, expr } => {
                 // This is ok because a new parameter found in the tree will
                 // always have a larger value then its predecessors, so the
                 // `conversion_table` will remain sorted.
                 conversion_table.to_mut().push(*param);
-                expr.alpha_convert_with_table(conversion_table);
+                *param = conversion_table.len() - 1 + start;
+                expr.alpha_convert_with_table(conversion_table, start);
             },
             Expr::Var(v) => {
+                assert!(conversion_table.is_sorted());
                 let pos = conversion_table
                     .binary_search(v)
                     .expect("Found var not present in conversion table.");
 
-                *v = pos;
+                *v = pos + start;
             },
         }
     }
 
-    // Perform beta-reduction.
+    pub fn get_biggest_var_id(&self) -> Option<usize> {
+        match self {
+            Expr::Nothing    |
+            Expr::Literal(_)            => None,
+            Expr::MacroRef(mac)         => mac.as_ref().expr.get_biggest_var_id(),
+            Expr::Appl { f, arg }       => {
+                f.get_biggest_var_id()
+                    .map(|v| {
+                        arg.get_biggest_var_id()
+                            .map_or(v, |v2| std::cmp::max(v, v2))
+                    })
+            },
+            Expr::Lambda { param, expr } => {
+                expr.get_biggest_var_id()
+                    .map(|v| std::cmp::max(*param, v))
+                    .or(Some(*param))
+            },
+            Expr::Var(v)                => Some(*v),
+        }
+    }
+
+    // Perform beta-reduction all the way to normal form.
     pub fn eval(&mut self) -> Result<&mut Expr, RuntimeError> {
         self.eval_depth(0, false)
     }
@@ -191,22 +217,28 @@ impl Expr {
         for _ in 0..MAX_EVAL_DEPTH {
             match self {
                 Expr::Literal(_) |
-                Expr::Var(_)              => return Ok(self),
-                Expr::Lambda { expr, .. } => {
-                    expr.eval_depth(depth + 1, eval_macros)?;
+                Expr::Var(_)        => return Ok(self),
+                Expr::Lambda { .. } => {
+                    /*
+                    // NOTE: Maybe this should happen...
+                    expr.eval_depth(depth + 1, false)?;
+                    */
                     return Ok(self);
                 },
                 Expr::Appl { f, .. }      => {
                     f.eval_depth(depth + 1, true)?;
+                    let biggest_f_var_id = f.get_biggest_var_id().unwrap_or(0);
                     let owned = self.take();
                     if let Expr::Appl {
                         f: box Expr::Lambda {
                             param,
                             box mut expr
                         },
-                        arg
+                        mut arg
                     } = owned {
+                        arg.alpha_convert_from(biggest_f_var_id + 1);
                         expr.subst(param, *arg);
+                        expr.alpha_convert();
                         drop(self.replace(expr));
                     } else {
                         drop(self.replace(owned));
@@ -215,9 +247,8 @@ impl Expr {
                 },
                 Expr::MacroRef(ptr) => {
                     if !ptr.as_ref().expr.is_normal_form() || eval_macros {
-                        let mut expr = ptr.expr.clone();
-                        // Q: Should this type of evaluation increase the evaluation depth?
-                        expr.eval_depth(depth, eval_macros)?;
+                        let expr = ptr.expr.clone();
+                        // expr.eval_depth(depth, eval_macros)?;
                         drop(std::mem::replace(self, expr));
                     } else {
                         return Ok(self);
@@ -281,7 +312,7 @@ impl std::fmt::Display for Expr {
                 }
             },
             Expr::Var(v)            => write!(f, "{}", (*v as u8 + 97) as char),
-            Expr::Literal(s)        => write!(f, "\"{}\"", s),
+            Expr::Literal(s)        => write!(f, "{}", s),
             Expr::MacroRef(ptr)     => {
                 let name = unsafe { &ptr.as_ref().name.as_ref() };
                 write!(f, "{}", name)

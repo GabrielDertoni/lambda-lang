@@ -2,3 +2,4 @@
 /archive
 Cargo.lock
 .lambda
+.vimsession

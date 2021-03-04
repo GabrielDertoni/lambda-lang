@@ -1,195 +1,72 @@
 pub mod ast;
 pub mod tokens;
 pub mod error;
-pub mod span;
 pub mod parser_cache;
+pub mod parse_stream;
 
-
-use std::any::{ Any, TypeId };
-use std::collections::HashMap;
-use std::cell::Cell;
-use std::rc::Rc;
-use std::cell::{ RefCell, RefMut };
-
+use crate::span::Span;
 use ast::*;
 use error::*;
-use span::*;
-use parser_cache::{ ParserCache, ParsedType };
+pub use parse_stream::*;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Clone)]
-pub struct ParseStream<'a> {
-    pub scope: Span,
-    curr_span: Cell<Span>,
-    cache: Rc<RefCell<ParserCache>>,
-    original: &'a str,
-    remaining: Cell<&'a str>,
+pub trait Spanned {
+    fn span(&self) -> Span;
 }
 
-impl<'a> ParseStream<'a> {
-    pub fn new(scope: Span, s: &'a str) -> ParseStream<'a> {
-        ParseStream {
-            scope,
-            curr_span: Cell::new(scope),
-            cache: Rc::new(RefCell::new(ParserCache::new())),
-            original: s,
-            remaining: Cell::new(s),
-        }
-    }
-
-    pub fn skip_whitespace(&self) {
-        while let Some(c) = self.get() {
-            if c.is_whitespace() {
-                self.advance();
-            } else {
-                break;
-            }
-        }
-    }
-
-    // Advances the stream until the next valid token, that means that it will
-    // automatically get rid of any and all whitespaces.
-    pub fn advance(&self) {
-        let mut span = self.curr_span();
-
-        let mut it = self.remaining.get().chars();
-        if it.next().is_some() {
-            span.start += 1;
-        }
-        self.remaining.set(it.as_str());
-        self.curr_span.set(span);
-    }
-
-    pub fn advance_by(&self, n: usize) {
-        let mut span = self.curr_span();
-
-        let mut it = self.remaining.get().chars();
-        for _ in 0..n {
-            if it.next().is_some() {
-                span.start += 1;
-            }
-        }
-        self.remaining.set(it.as_str());
-
-        self.curr_span.set(span);
-    }
-
-    // Advances the stream, skipping any space, and returns the next
-    // non-whitespace char.
-    pub fn next(&self) -> Option<char> {
-        self.skip_whitespace();
-        self.get()
-    }
-
-
-    pub fn get_line_column_number(&self, span: Span) -> (usize, usize) {
-        for (i, line) in self.line_spans().into_iter().enumerate() {
-            if line.contains(span.start()) {
-                return (i, span.start - line.start)
-            }
-        }
-        panic!("Unable to get line and column number")
-    }
-
-    fn line_spans(&self) -> Vec<Span> {
-        let mut span = Span::new(0, self.original.len());
-        let mut lines = Vec::new();
-
-        for line in self.original.lines() {
-            lines.push(span.with_width(line.len()));
-            span.start += line.len() + 1;
-        }
-
-        lines
-    }
-
-    fn borrow_mut_cache(&self) -> Result<RefMut<ParserCache>> {
-        self.cache.as_ref()
-            .try_borrow_mut()
-            .map_err(|_|
-                Error::new(
-                    self.scope,
-                    "CompilerError: Failed to borrow mutably the parse cache."
-                )
-            )
-    }
-
-    pub fn parse<T: 'static + Parser>(&self) -> Result<&T> {
-        let type_id = TypeId::of::<T>();
-        let remaining_len = self.get_remaining().len();
-        let cache_ref = self.borrow_mut_cache()?;
-
-        Ok(match cache_ref.get(&remaining_len) {
-            Some(can_be_parsed)
-                if let Some(found) = can_be_parsed.get(&type_id) => found.as_ref(),
-
-            maybe_map => {
-                let parsed = T::parse(self)?;
-                let map = match maybe_map {
-                    Some(map) => map,
-                    None => {
-                        let new_map = HashMap::new();
-                        assert!(cache_ref.insert(remaining_len, new_map).is_none());
-                        cache_ref
-                            .get(&remaining_len)
-                            .unwrap() // Safe: we have just inserted the entry.
-                    }
-                };
-                let after_len = self.get_remaining().len();
-                assert!(map.insert(type_id, ParsedType::new(after_len, parsed)).is_none());
-                map.get(&type_id).unwrap().as_ref()
-            },
-        })
-    }
-
+impl Spanned for Span {
     #[inline]
-    pub fn fork(&self) -> ParseStream<'a> {
-        self.clone()
-    }
+    fn span(&self) -> Span { *self }
+}
 
+impl<T: Spanned> Spanned for Box<T> {
     #[inline]
-    pub fn get(&self) -> Option<char> {
-        self.remaining.get().chars().nth(0)
-    }
+    fn span(&self) -> Span { self.as_ref().span() }
+}
 
-    #[inline]
-    pub fn get_remaining(&self) -> &'a str {
-        self.remaining.get()
-    }
-
-    #[inline]
-    pub fn peek(&self, n: usize) -> Option<&'a str> {
-        self.remaining.get().get(..n)
-    }
-
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.get_remaining()
-            .chars()
-            .all(char::is_whitespace)
-    }
-
-    #[inline]
-    pub fn curr_span(&self) -> Span {
-        self.curr_span.get()
+impl<T: Spanned> Spanned for [T] {
+    fn span(&self) -> Span {
+        self.iter()
+            .map(|el| el.span())
+            .fold_first(|a, b| a.merge(b))
+            .unwrap()
     }
 }
 
-impl<'a> From<&'a str> for ParseStream<'a> {
-    fn from(s: &'a str) -> Self {
-        ParseStream::new(Span::from(s), s)
+impl<Fst: Spanned, Snd: Spanned> Spanned for Vec<(Fst, Snd)> {
+    fn span(&self) -> Span {
+        let (left, right) = self.iter()
+            .map(|(fst, snd)| (fst.span(), snd.span()))
+            .fold_first(|(pfst, psnd), (fst, snd)| (pfst.merge(fst), psnd.merge(snd)))
+            .unwrap();
+
+        left.merge(right)
     }
 }
 
-
-pub trait Parser: Sized {
+/// Parsers need to live for 'static so that their resulting values can be
+/// cached in the system. It also needs to be Clone so that it can be cloned
+/// from cache inside `ParseStream`.
+pub trait Parser: 'static + Clone + Spanned {
     fn parse<'tok>(input: &ParseStream<'tok>) -> Result<Self>;
+
+    /// This function has a similar notation to the `Parser::parse` function,
+    /// but its implementation may vary if a type can error, but still keep
+    /// parsing. If it can't, then it should just use the default
+    /// implementation.
+    fn try_parse<'tok>(input: &ParseStream<'tok>) -> Result<Self> {
+        input.parse()
+    }
 }
 
 impl<T: Parser> Parser for Box<T> {
     fn parse<'tok>(input: &ParseStream<'tok>) -> Result<Box<T>> {
         Ok(Box::new(input.parse()?))
+    }
+
+    fn try_parse<'tok>(input: &ParseStream<'tok>) -> Result<Box<T>> {
+        Ok(Box::new(input.try_parse()?))
     }
 }
 
@@ -216,16 +93,25 @@ impl Parser for Program {
 
 impl Parser for Stmt {
     fn parse<'tok>(input: &ParseStream<'tok>) -> Result<Stmt> {
-        input.parse()
+        let result = input.parse()
             .map(|macro_def| Stmt::Macro(macro_def))
-            .or_else(|_| Ok(Stmt::Expr(input.parse()?)))
+            .or_else(|_| {
+                let cache = input.cache_borrow_mut()?;
+                drop(cache);
+                Ok(Stmt::Expr(input.parse()?))
+            });
+
+        if result.is_ok() && input.get_remaining().len() > 0 {
+            Err(Error::new(input.curr_span(), "unexpected trailing input"))
+        } else {
+            result
+        }
     }
 }
 
 impl Parser for Macro {
     fn parse<'tok>(input: &ParseStream<'tok>) -> Result<Macro> {
         Ok(Macro {
-            def_token: input.parse()?,
             name: input.parse()?,
             eq_token: input.parse()?,
             value: input.parse()?,
@@ -237,21 +123,32 @@ impl Parser for Expr {
     fn parse<'tok>(input: &ParseStream<'tok>) -> Result<Expr> {
         input.skip_whitespace();
 
-        let peek_stream = input.fork();
-        if tokens::Lambda::parse(&peek_stream).is_ok() {
-            let lamb = match input.parse() {
-                Ok(lamb) => lamb,
-                Err(err) => return Err(err),
-            };
-            Ok(Expr::Lambda(lamb))
-        } else {
-            let lhs = input.parse()?;
-            if input.is_empty() {
-                Ok(Expr::Close(lhs))
-            } else {
-                Ok(Expr::Appl(parse_appl_with_lhs(input, lhs)?))
-            }
-        }
+        Ok({
+            input.parse()
+                .map(|lamb| Expr::Lambda(lamb))
+                .or_else(|err| {
+                    input.parse()
+                        .map(|appl| Expr::Appl(appl))
+                        .map_err(|appl_err| err.or(appl_err))
+                })
+                .or_else(|err| {
+                    input.parse()
+                        .and_then(|close| {
+                            input.skip_whitespace();
+
+                            // At this point, it is expected to parse the entire input
+                            if let None = input.get() {
+                                Ok(Expr::Close(close))
+                            } else {
+                                Err(Error::new(input.curr_span().start(), "unexpected trailing input"))
+                            }
+                        })
+                        .map_err(|close_err| err.or(close_err))
+                })
+                .map_err(|err| {
+                    Error::new(err.cover_span(), "expected an expression")
+                })
+        }?)
     }
 }
 
@@ -268,12 +165,29 @@ impl Parser for Lambda {
 
 impl Parser for Appl {
     fn parse<'tok>(input: &ParseStream<'tok>) -> Result<Appl> {
-        let lhs = input.parse()?;
-        parse_appl_with_lhs(input, lhs)
+        let lo = input.curr_span().start;
+        let mut root = Appl {
+            lhs: input.parse()?,
+            rhs: input.parse()?,
+        };
+
+        while !input.is_empty() {
+            let rhs = input.parse()?;
+            let hi = input.curr_span().start;
+            let group = tokens::Group::new(Span::new(lo, hi), tokens::Delimiter::None);
+            root = Appl {
+                lhs: Close::Grouping(box Expr::Appl(root), group),
+                rhs,
+            };
+        }
+        Ok(root)
+
+        // parse_appl_with_lhs(input, lhs)
     }
 }
 
-fn parse_appl_with_lhs<'tok>(input: &ParseStream<'tok>, lhs: Close) -> Result<Appl> {
+/*
+fn parse_appl_with_lhs<'tok>(input: &ParseStream<'tok>, lhs: Close, mut log: usize) -> Result<Appl> {
         let mut root = Appl {
             lhs,
             rhs: input.parse()?,
@@ -281,27 +195,65 @@ fn parse_appl_with_lhs<'tok>(input: &ParseStream<'tok>, lhs: Close) -> Result<Ap
 
         while !input.is_empty() {
             let rhs = input.parse()?;
+            let hi = input.curr_span().start;
+            let group = tokens::Group::new(Span::new(lo, hi), tokens::Delimiter::None);
             root = Appl {
-                lhs: Close::Paren(Box::new(Expr::Appl(root))),
+                lhs: Close::Grouping(box Expr::Appl(root), ),
                 rhs,
             };
         }
         Ok(root)
 }
+*/
 
 impl Parser for Close {
     fn parse<'tok>(input: &ParseStream<'tok>) -> Result<Close> {
-        let lookahead = input.fork();
+        Ok({
+            input
+                .parse_parethesized()
+                .map(|(expr, group)| {
+                    Close::Grouping(expr, tokens::Group::new(group, tokens::Delimiter::Paren))
+                })
+                .or_else(|err| {
+                    input.parse()
+                        .map(|var| Close::Var(var))
+                        .map_err(|var_err| {
+                            err.or(var_err)
+                            /*
+                            error.extend(var_err.messages);
+                            Err(error)
+                            */
+                        })
+                })
+                .or_else(|err| {
+                    input.parse()
+                        .map(|lit| Close::Literal(lit))
+                        .map_err(|lit_err| {
+                            err.or(lit_err)
+                            /*
+                            error.extend(var_err.messages);
+                            Err(error)
+                            */
+                        })
+                })
+        }?)
+    }
+}
 
-        Ok(if tokens::LParen::parse(&lookahead).is_ok() {
-            let (content, _paren) = tokens::parse_parenthesis(input)?;
-            let expr = Box::new(Expr::parse(&content)?);
-            Close::Paren(expr)
-        } else if tokens::Quote::parse(&lookahead).is_ok() {
-            Close::Literal(input.parse()?)
+impl Parser for VarList {
+    fn parse<'tok>(input: &ParseStream<'tok>) -> Result<Self> {
+        input.skip_whitespace();
+
+        let mut list = Vec::new();
+        while let Ok(tuple) = input.parse_once(|s| Ok((s.parse()?, s.parse()?))) {
+            list.push(tuple);
+        }
+
+        if list.len() > 0 {
+            Ok(VarList { list })
         } else {
-            Close::Var(input.parse()?)
-        })
+            Err(Error::new(input.curr_span().start(), "expected variable list"))
+        }
     }
 }
 
